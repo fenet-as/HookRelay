@@ -12,6 +12,7 @@ import (
 
 	"github.com/fenet-as/hookrelay/internal/api"
 	"github.com/fenet-as/hookrelay/internal/config"
+	"github.com/fenet-as/hookrelay/internal/delivery"
 	"github.com/fenet-as/hookrelay/internal/store"
 )
 
@@ -46,20 +47,30 @@ func main() {
 	defer stop()
 
 	// 2. Connect to PostgreSQL
-	pool, err := store.NewPool(ctx, store.PoolConfig{
+	dbPool, err := store.NewPool(ctx, store.PoolConfig{
 		DatabaseURL: cfg.DatabaseURL,
-		MaxConns:    10,
+		MaxConns:    20,
 	})
 	if err != nil {
 		logger.Error("failed to connect to database", "error", err)
 		os.Exit(1)
 	}
-	defer pool.Close()
+	defer dbPool.Close()
 
 	logger.Info("connected to PostgreSQL successfully")
 
-	// 3. Initialize API server
-	server := api.NewServer(pool, logger)
+	queries := store.New(dbPool)
+
+	// 3. Initialize Outbound Delivery Client, Dispatcher, and Worker Pool
+	client := delivery.NewClient(delivery.DefaultClientConfig())
+	dispatcher := delivery.NewDispatcher(client, queries, logger)
+
+	workerPoolCfg := delivery.DefaultPoolConfig()
+	deliveryPool := delivery.NewPool(workerPoolCfg, dispatcher, queries, logger)
+	deliveryPool.Start(ctx)
+
+	// 4. Initialize API server
+	server := api.NewServer(dbPool, logger)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	httpServer := &http.Server{
@@ -75,10 +86,11 @@ func main() {
 		}
 	}()
 
-	// 4. Wait for OS Termination Signal
+	// 5. Wait for OS Termination Signal
 	<-ctx.Done()
 	logger.Info("shutdown signal received, initiating graceful shutdown...")
 
+	// Step A: Stop accepting new HTTP requests (10s deadline)
 	shutdownCtx, cancelHTTP := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelHTTP()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
@@ -86,6 +98,13 @@ func main() {
 	} else {
 		logger.Info("HTTP server stopped cleanly")
 	}
+
+	// Step B: Stop worker pool and wait for in-flight tasks to finish
+	logger.Info("stopping delivery worker pool...")
+	deliveryPool.Stop()
+
+	// Step C: Close idle keep-alive connections in HTTP transport
+	client.CloseIdleConnections()
 
 	logger.Info("service shutdown complete")
 }

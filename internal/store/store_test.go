@@ -223,7 +223,7 @@ func TestStore_DeliveriesAndAttempts(t *testing.T) {
 	staleThreshold := pgtype.Timestamptz{Time: time.Now().Add(-5 * time.Minute), Valid: true}
 	claimed, err := queries.ClaimDueDeliveries(ctx, store.ClaimDueDeliveriesParams{
 		LockedAt: staleThreshold,
-		Limit:    10,
+		Limit:    500,
 	})
 	if err != nil {
 		t.Fatalf("ClaimDueDeliveries failed: %v", err)
