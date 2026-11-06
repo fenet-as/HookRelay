@@ -8,6 +8,25 @@ RETURNING *;
 SELECT * FROM deliveries
 WHERE id = $1;
 
+-- name: GetDeliveryWithDetails :one
+SELECT
+    d.id AS delivery_id,
+    d.event_id,
+    d.endpoint_id,
+    d.status,
+    d.attempts,
+    d.next_run_at,
+    d.locked_at,
+    e.type AS event_type,
+    e.payload AS event_payload,
+    ep.url AS endpoint_url,
+    ep.secret AS endpoint_secret,
+    ep.active AS endpoint_active
+FROM deliveries d
+JOIN events e ON d.event_id = e.id
+JOIN endpoints ep ON d.endpoint_id = ep.id
+WHERE d.id = $1;
+
 -- name: ListDeliveriesByEventID :many
 SELECT * FROM deliveries
 WHERE event_id = $1

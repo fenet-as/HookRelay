@@ -110,6 +110,61 @@ func (q *Queries) GetDeliveryByID(ctx context.Context, id int64) (Delivery, erro
 	return i, err
 }
 
+const getDeliveryWithDetails = `-- name: GetDeliveryWithDetails :one
+SELECT
+    d.id AS delivery_id,
+    d.event_id,
+    d.endpoint_id,
+    d.status,
+    d.attempts,
+    d.next_run_at,
+    d.locked_at,
+    e.type AS event_type,
+    e.payload AS event_payload,
+    ep.url AS endpoint_url,
+    ep.secret AS endpoint_secret,
+    ep.active AS endpoint_active
+FROM deliveries d
+JOIN events e ON d.event_id = e.id
+JOIN endpoints ep ON d.endpoint_id = ep.id
+WHERE d.id = $1
+`
+
+type GetDeliveryWithDetailsRow struct {
+	DeliveryID     int64
+	EventID        string
+	EndpointID     int64
+	Status         DeliveryStatus
+	Attempts       int32
+	NextRunAt      pgtype.Timestamptz
+	LockedAt       pgtype.Timestamptz
+	EventType      string
+	EventPayload   []byte
+	EndpointUrl    string
+	EndpointSecret string
+	EndpointActive bool
+}
+
+func (q *Queries) GetDeliveryWithDetails(ctx context.Context, id int64) (GetDeliveryWithDetailsRow, error) {
+	row := q.db.QueryRow(ctx, getDeliveryWithDetails, id)
+	var i GetDeliveryWithDetailsRow
+	err := row.Scan(
+		&i.DeliveryID,
+		&i.EventID,
+		&i.EndpointID,
+		&i.Status,
+		&i.Attempts,
+		&i.NextRunAt,
+		&i.LockedAt,
+		&i.EventType,
+		&i.EventPayload,
+		&i.EndpointUrl,
+		&i.EndpointSecret,
+		&i.EndpointActive,
+	)
+	return i, err
+}
+
 const listDeliveriesByEventID = `-- name: ListDeliveriesByEventID :many
 SELECT id, event_id, endpoint_id, status, attempts, next_run_at, locked_at, created_at FROM deliveries
 WHERE event_id = $1
