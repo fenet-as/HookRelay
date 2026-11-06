@@ -310,3 +310,41 @@ func (q *Queries) ScheduleDeliveryRetry(ctx context.Context, arg ScheduleDeliver
 	)
 	return i, err
 }
+
+const unlockStuckDeliveries = `-- name: UnlockStuckDeliveries :many
+UPDATE deliveries
+SET locked_at = NULL
+WHERE status = 'pending'
+  AND locked_at IS NOT NULL
+  AND locked_at < $1
+RETURNING id, event_id, endpoint_id, status, attempts, next_run_at, locked_at, created_at
+`
+
+func (q *Queries) UnlockStuckDeliveries(ctx context.Context, lockedAt pgtype.Timestamptz) ([]Delivery, error) {
+	rows, err := q.db.Query(ctx, unlockStuckDeliveries, lockedAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Delivery
+	for rows.Next() {
+		var i Delivery
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventID,
+			&i.EndpointID,
+			&i.Status,
+			&i.Attempts,
+			&i.NextRunAt,
+			&i.LockedAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

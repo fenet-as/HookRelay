@@ -61,13 +61,19 @@ func main() {
 
 	queries := store.New(dbPool)
 
-	// 3. Initialize Outbound Delivery Client, Dispatcher, and Worker Pool
-	client := delivery.NewClient(delivery.DefaultClientConfig())
+	// 3. Initialize Outbound Delivery Client, Dispatcher, Worker Pool, and Crash Recovery Reaper
+	clientCfg := delivery.DefaultClientConfig()
+	clientCfg.AllowLocal = cfg.AllowLocal
+	client := delivery.NewClient(clientCfg)
 	dispatcher := delivery.NewDispatcher(client, queries, logger)
 
 	workerPoolCfg := delivery.DefaultPoolConfig()
 	deliveryPool := delivery.NewPool(workerPoolCfg, dispatcher, queries, logger)
 	deliveryPool.Start(ctx)
+
+	reaperCfg := delivery.DefaultReaperConfig()
+	reaper := delivery.NewReaper(reaperCfg, queries, logger)
+	go reaper.Start(ctx)
 
 	// 4. Initialize API server
 	server := api.NewServer(dbPool, logger)

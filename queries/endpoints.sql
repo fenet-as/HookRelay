@@ -35,3 +35,17 @@ SELECT * FROM endpoints
 WHERE active = true
   AND (cardinality(event_types) = 0 OR sqlc.arg('event_type')::text = ANY(event_types))
 ORDER BY id ASC;
+
+-- name: GetRecentAttemptsForEndpoint :many
+SELECT da.status_code, da.error
+FROM delivery_attempts da
+JOIN deliveries d ON da.delivery_id = d.id
+WHERE d.endpoint_id = $1
+ORDER BY da.started_at DESC, da.id DESC
+LIMIT $2;
+
+-- name: DeactivateEndpoint :exec
+UPDATE endpoints
+SET active = false
+WHERE id = $1;
+

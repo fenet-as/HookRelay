@@ -47,6 +47,14 @@ WHERE id IN (
 )
 RETURNING *;
 
+-- name: UnlockStuckDeliveries :many
+UPDATE deliveries
+SET locked_at = NULL
+WHERE status = 'pending'
+  AND locked_at IS NOT NULL
+  AND locked_at < $1
+RETURNING *;
+
 -- name: MarkDeliverySucceeded :one
 UPDATE deliveries
 SET

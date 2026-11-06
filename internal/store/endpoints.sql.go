@@ -43,6 +43,17 @@ func (q *Queries) CreateEndpoint(ctx context.Context, arg CreateEndpointParams) 
 	return i, err
 }
 
+const deactivateEndpoint = `-- name: DeactivateEndpoint :exec
+UPDATE endpoints
+SET active = false
+WHERE id = $1
+`
+
+func (q *Queries) DeactivateEndpoint(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, deactivateEndpoint, id)
+	return err
+}
+
 const deleteEndpoint = `-- name: DeleteEndpoint :exec
 DELETE FROM endpoints
 WHERE id = $1
@@ -70,6 +81,45 @@ func (q *Queries) GetEndpointByID(ctx context.Context, id int64) (Endpoint, erro
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const getRecentAttemptsForEndpoint = `-- name: GetRecentAttemptsForEndpoint :many
+SELECT da.status_code, da.error
+FROM delivery_attempts da
+JOIN deliveries d ON da.delivery_id = d.id
+WHERE d.endpoint_id = $1
+ORDER BY da.started_at DESC, da.id DESC
+LIMIT $2
+`
+
+type GetRecentAttemptsForEndpointParams struct {
+	EndpointID int64
+	Limit      int32
+}
+
+type GetRecentAttemptsForEndpointRow struct {
+	StatusCode pgtype.Int4
+	Error      pgtype.Text
+}
+
+func (q *Queries) GetRecentAttemptsForEndpoint(ctx context.Context, arg GetRecentAttemptsForEndpointParams) ([]GetRecentAttemptsForEndpointRow, error) {
+	rows, err := q.db.Query(ctx, getRecentAttemptsForEndpoint, arg.EndpointID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetRecentAttemptsForEndpointRow
+	for rows.Next() {
+		var i GetRecentAttemptsForEndpointRow
+		if err := rows.Scan(&i.StatusCode, &i.Error); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listActiveEndpointsForEventType = `-- name: ListActiveEndpointsForEventType :many

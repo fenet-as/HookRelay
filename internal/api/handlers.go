@@ -441,3 +441,47 @@ func (s *Server) GetDeliveryByIDHandler(c *gin.Context) {
 		AttemptsList: attemptResponses,
 	})
 }
+
+// ReplayDeliveryHandler resets a delivery to pending so workers can re-execute it.
+func (s *Server) ReplayDeliveryHandler(c *gin.Context) {
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+
+	// Verify delivery exists
+	_, err := s.queries.GetDeliveryByID(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.JSON(http.StatusNotFound, ErrorResponse{Error: "delivery not found"})
+			return
+		}
+		s.logger.Error("failed to find delivery for replay", "id", id, "error", err)
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to replay delivery"})
+		return
+	}
+
+	replayed, err := s.queries.ReplayDelivery(c.Request.Context(), id)
+	if err != nil {
+		s.logger.Error("failed to replay delivery in store", "id", id, "error", err)
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to replay delivery"})
+		return
+	}
+
+	var lockedAt *time.Time
+	if replayed.LockedAt.Valid {
+		t := replayed.LockedAt.Time
+		lockedAt = &t
+	}
+
+	c.JSON(http.StatusOK, DeliveryResponse{
+		ID:         replayed.ID,
+		EventID:    replayed.EventID,
+		EndpointID: replayed.EndpointID,
+		Status:     string(replayed.Status),
+		Attempts:   replayed.Attempts,
+		NextRunAt:  replayed.NextRunAt.Time,
+		LockedAt:   lockedAt,
+		CreatedAt:  replayed.CreatedAt.Time,
+	})
+}
