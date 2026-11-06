@@ -12,9 +12,11 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fenet-as/hookrelay/internal/api"
 	"github.com/fenet-as/hookrelay/internal/crypto"
+	"github.com/fenet-as/hookrelay/internal/id"
 	"github.com/fenet-as/hookrelay/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -49,7 +51,7 @@ func setupTestServer(t *testing.T) (*api.Server, *pgxpool.Pool, func()) {
 	return server, pool, cleanup
 }
 
-func performRequest(r http.Handler, method, path string, body []byte) *httptest.ResponseRecorder {
+func performRequest(r http.Handler, method, path string, body []byte, headers ...map[string]string) *httptest.ResponseRecorder {
 	var bodyReader io.Reader
 	if body != nil {
 		bodyReader = bytes.NewReader(body)
@@ -57,6 +59,11 @@ func performRequest(r http.Handler, method, path string, body []byte) *httptest.
 	req, _ := http.NewRequest(method, path, bodyReader)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if len(headers) > 0 {
+		for k, v := range headers[0] {
+			req.Header.Set(k, v)
+		}
 	}
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -146,25 +153,21 @@ func TestGetEndpoint_SecretOmitted(t *testing.T) {
 	server, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	// 1. Create endpoint
 	createPayload := []byte(`{"url": "https://example.com/credentials-check"}`)
 	wCreate := performRequest(server.Router(), "POST", "/endpoints", createPayload)
 	var created api.EndpointCreatedResponse
 	_ = json.Unmarshal(wCreate.Body.Bytes(), &created)
 
-	// 2. Fetch endpoint by ID
 	wGet := performRequest(server.Router(), "GET", fmt.Sprintf("/endpoints/%d", created.ID), nil)
 	if wGet.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK, got %d", wGet.Code)
 	}
 
-	// Raw JSON must NOT contain `"secret":` or the raw secret token
 	bodyStr := wGet.Body.String()
 	if strings.Contains(bodyStr, `"secret":`) || strings.Contains(bodyStr, created.Secret) {
 		t.Fatalf("GET /endpoints/:id must never expose secret, but found it in body: %s", bodyStr)
 	}
 
-	// 3. List endpoints
 	wList := performRequest(server.Router(), "GET", "/endpoints", nil)
 	if wList.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK for list, got %d", wList.Code)
@@ -179,13 +182,11 @@ func TestUpdateEndpoint(t *testing.T) {
 	server, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	// Create
 	createPayload := []byte(`{"url": "https://example.com/v1"}`)
 	wCreate := performRequest(server.Router(), "POST", "/endpoints", createPayload)
 	var created api.EndpointCreatedResponse
 	_ = json.Unmarshal(wCreate.Body.Bytes(), &created)
 
-	// Update URL and Active status
 	newURL := "https://example.com/v2"
 	active := false
 	updatePayload, _ := json.Marshal(map[string]interface{}{
@@ -212,13 +213,11 @@ func TestRotateSecret(t *testing.T) {
 	server, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	// Create
 	createPayload := []byte(`{"url": "https://example.com/rotate-test"}`)
 	wCreate := performRequest(server.Router(), "POST", "/endpoints", createPayload)
 	var created api.EndpointCreatedResponse
 	_ = json.Unmarshal(wCreate.Body.Bytes(), &created)
 
-	// Rotate secret
 	wRotate := performRequest(server.Router(), "POST", fmt.Sprintf("/endpoints/%d/rotate-secret", created.ID), nil)
 	if wRotate.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK, got %d: %s", wRotate.Code, wRotate.Body.String())
@@ -241,21 +240,124 @@ func TestDeleteEndpoint(t *testing.T) {
 	server, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	// Create
 	createPayload := []byte(`{"url": "https://example.com/to-delete"}`)
 	wCreate := performRequest(server.Router(), "POST", "/endpoints", createPayload)
 	var created api.EndpointCreatedResponse
 	_ = json.Unmarshal(wCreate.Body.Bytes(), &created)
 
-	// Delete
 	wDelete := performRequest(server.Router(), "DELETE", fmt.Sprintf("/endpoints/%d", created.ID), nil)
 	if wDelete.Code != http.StatusNoContent {
 		t.Fatalf("expected 204 No Content, got %d", wDelete.Code)
 	}
 
-	// Verify 404
 	wGet := performRequest(server.Router(), "GET", fmt.Sprintf("/endpoints/%d", created.ID), nil)
 	if wGet.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 Not Found after delete, got %d", wGet.Code)
+	}
+}
+
+func TestPublishEvent_SuccessAndFanOut(t *testing.T) {
+	server, _, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// 1. Create matching endpoint
+	epPayload := []byte(`{"url": "https://example.com/events-receiver", "event_types": ["charge.succeeded"]}`)
+	wEp := performRequest(server.Router(), "POST", "/endpoints", epPayload)
+	if wEp.Code != http.StatusCreated {
+		t.Fatalf("failed to create endpoint: %d", wEp.Code)
+	}
+
+	// 2. Publish event
+	eventPayload := []byte(`{
+		"type": "charge.succeeded",
+		"data": {"charge_id": "ch_123", "amount": 4200}
+	}`)
+	wPub := performRequest(server.Router(), "POST", "/events", eventPayload)
+	if wPub.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 Accepted, got %d: %s", wPub.Code, wPub.Body.String())
+	}
+
+	var pubRes api.PublishEventResponse
+	if err := json.Unmarshal(wPub.Body.Bytes(), &pubRes); err != nil {
+		t.Fatalf("invalid json response: %v", err)
+	}
+
+	if !strings.HasPrefix(pubRes.ID, id.EventPrefix) {
+		t.Errorf("expected event ID prefix %s, got %s", id.EventPrefix, pubRes.ID)
+	}
+	if pubRes.Type != "charge.succeeded" {
+		t.Errorf("expected type charge.succeeded, got %s", pubRes.Type)
+	}
+	if pubRes.DeliveriesCount == 0 {
+		t.Errorf("expected at least 1 delivery created")
+	}
+	if pubRes.IsDuplicate {
+		t.Errorf("expected new event, not duplicate")
+	}
+
+	// 3. Query GET /events/:id
+	wGetEvt := performRequest(server.Router(), "GET", "/events/"+pubRes.ID, nil)
+	if wGetEvt.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for GET /events/:id, got %d", wGetEvt.Code)
+	}
+
+	var evtRes api.EventResponse
+	if err := json.Unmarshal(wGetEvt.Body.Bytes(), &evtRes); err != nil {
+		t.Fatalf("invalid json for GET event: %v", err)
+	}
+	if evtRes.ID != pubRes.ID {
+		t.Errorf("expected event ID %s, got %s", pubRes.ID, evtRes.ID)
+	}
+	if len(evtRes.Deliveries) == 0 {
+		t.Fatalf("expected deliveries attached to event response")
+	}
+
+	// 4. Query GET /deliveries/:id
+	deliveryID := evtRes.Deliveries[0].ID
+	wGetDeliv := performRequest(server.Router(), "GET", fmt.Sprintf("/deliveries/%d", deliveryID), nil)
+	if wGetDeliv.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for GET /deliveries/:id, got %d", wGetDeliv.Code)
+	}
+
+	var delivRes api.DeliveryResponse
+	if err := json.Unmarshal(wGetDeliv.Body.Bytes(), &delivRes); err != nil {
+		t.Fatalf("invalid json for GET delivery: %v", err)
+	}
+	if delivRes.ID != deliveryID {
+		t.Errorf("expected delivery ID %d, got %d", deliveryID, delivRes.ID)
+	}
+}
+
+func TestPublishEvent_IdempotencyDeduplication(t *testing.T) {
+	server, _, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	idemKey := "idem_api_test_" + time.Now().Format("20060102150405.000000")
+	payload := []byte(`{"type": "user.signup", "data": {"user_id": "u_99"}}`)
+	headers := map[string]string{"Idempotency-Key": idemKey}
+
+	// 1. First publish
+	w1 := performRequest(server.Router(), "POST", "/events", payload, headers)
+	if w1.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 Accepted on first publish, got %d: %s", w1.Code, w1.Body.String())
+	}
+	var res1 api.PublishEventResponse
+	_ = json.Unmarshal(w1.Body.Bytes(), &res1)
+	if res1.IsDuplicate {
+		t.Fatalf("first publish should not be marked as duplicate")
+	}
+
+	// 2. Second publish with identical Idempotency-Key
+	w2 := performRequest(server.Router(), "POST", "/events", payload, headers)
+	if w2.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 Accepted on duplicate publish, got %d: %s", w2.Code, w2.Body.String())
+	}
+	var res2 api.PublishEventResponse
+	_ = json.Unmarshal(w2.Body.Bytes(), &res2)
+	if !res2.IsDuplicate {
+		t.Fatalf("second publish must be marked as duplicate")
+	}
+	if res2.ID != res1.ID {
+		t.Errorf("expected duplicate publish to return original event ID %s, got %s", res1.ID, res2.ID)
 	}
 }

@@ -3,17 +3,19 @@ package api
 import (
 	"log/slog"
 
+	"github.com/fenet-as/hookrelay/internal/fanout"
 	"github.com/fenet-as/hookrelay/internal/store"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Server coordinates HTTP routing, handlers, and persistence.
+// Server coordinates HTTP routing, handlers, fan-out engine, and persistence.
 type Server struct {
 	router  *gin.Engine
 	queries *store.Queries
 	pool    *pgxpool.Pool
 	logger  *slog.Logger
+	fanout  *fanout.Engine
 }
 
 // NewServer builds and configures a new HTTP Server instance.
@@ -26,6 +28,7 @@ func NewServer(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 		queries: store.New(pool),
 		pool:    pool,
 		logger:  logger,
+		fanout:  fanout.NewEngine(pool),
 	}
 
 	// Attach custom slog logging and panic recovery
@@ -54,5 +57,16 @@ func (s *Server) registerRoutes() {
 		endpointsGroup.PATCH("/:id", s.UpdateEndpointHandler)
 		endpointsGroup.DELETE("/:id", s.DeleteEndpointHandler)
 		endpointsGroup.POST("/:id/rotate-secret", s.RotateSecretHandler)
+	}
+
+	eventsGroup := s.router.Group("/events")
+	{
+		eventsGroup.POST("", s.PublishEventHandler)
+		eventsGroup.GET("/:id", s.GetEventByIDHandler)
+	}
+
+	deliveriesGroup := s.router.Group("/deliveries")
+	{
+		deliveriesGroup.GET("/:id", s.GetDeliveryByIDHandler)
 	}
 }
