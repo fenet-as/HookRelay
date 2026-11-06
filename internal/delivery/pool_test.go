@@ -247,3 +247,67 @@ func TestPool_FlakyReceiverEventuallySucceeds(t *testing.T) {
 		t.Errorf("expected 2 attempts before success, got %d", finalDeliv.Attempts)
 	}
 }
+
+func TestPool_ConsecutiveFailuresAutoDisableEndpoint(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, queries, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Receiver always returns 500
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	ep, _, deliv := setupDeliveryFixtures(t, ctx, queries, ts.URL)
+	defer queries.DeleteEndpoint(ctx, ep.ID)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := delivery.NewClient(delivery.DefaultClientConfig())
+	dispatcher := delivery.NewDispatcher(client, queries, logger)
+
+	const threshold = 3
+	poolCfg := delivery.PoolConfig{
+		Workers:                     2,
+		PollInterval:                10 * time.Millisecond,
+		BatchSize:                   5,
+		LockStaleThreshold:          1 * time.Minute,
+		ConsecutiveFailureThreshold: threshold,
+		RetryPolicy: delivery.RetryPolicy{
+			MaxAttempts:     threshold,
+			InitialInterval: 10 * time.Millisecond,
+			MaxInterval:     30 * time.Millisecond,
+		},
+	}
+
+	pool := delivery.NewPool(poolCfg, dispatcher, queries, logger)
+	pool.Start(ctx)
+	defer pool.Stop()
+
+	// Wait for delivery to reach dead (after 3 attempts) and endpoint to auto-deactivate
+	deadline := time.Now().Add(4 * time.Second)
+	var endpointActive = true
+	for time.Now().Before(deadline) {
+		endpoint, err := queries.GetEndpointByID(ctx, ep.ID)
+		if err == nil && !endpoint.Active {
+			endpointActive = false
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if endpointActive {
+		t.Fatalf("expected endpoint %d to be auto-disabled after %d consecutive failures", ep.ID, threshold)
+	}
+
+	// Verify delivery is dead
+	finalDeliv, err := queries.GetDeliveryByID(ctx, deliv.ID)
+	if err != nil {
+		t.Fatalf("failed to get delivery: %v", err)
+	}
+	if finalDeliv.Status != store.DeliveryStatusDead {
+		t.Errorf("expected delivery to be dead, got %s", finalDeliv.Status)
+	}
+}

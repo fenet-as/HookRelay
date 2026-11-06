@@ -361,3 +361,67 @@ func TestPublishEvent_IdempotencyDeduplication(t *testing.T) {
 		t.Errorf("expected duplicate publish to return original event ID %s, got %s", res1.ID, res2.ID)
 	}
 }
+
+func TestReplayDelivery(t *testing.T) {
+	server, pool, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	queries := store.New(pool)
+	ctx := context.Background()
+
+	// 1. Create an endpoint
+	epPayload := []byte(`{"url": "https://example.com/replay-target", "event_types": ["payment.refunded"]}`)
+	wEp := performRequest(server.Router(), "POST", "/endpoints", epPayload)
+	if wEp.Code != http.StatusCreated {
+		t.Fatalf("failed to create endpoint: %d", wEp.Code)
+	}
+
+	// 2. Publish event
+	eventPayload := []byte(`{"type": "payment.refunded", "data": {"refund_id": "ref_555"}}`)
+	wPub := performRequest(server.Router(), "POST", "/events", eventPayload)
+	if wPub.Code != http.StatusAccepted {
+		t.Fatalf("failed to publish event: %d", wPub.Code)
+	}
+
+	var pubRes api.PublishEventResponse
+	_ = json.Unmarshal(wPub.Body.Bytes(), &pubRes)
+
+	// Get delivery ID
+	wGetEvt := performRequest(server.Router(), "GET", "/events/"+pubRes.ID, nil)
+	var evtRes api.EventResponse
+	_ = json.Unmarshal(wGetEvt.Body.Bytes(), &evtRes)
+	if len(evtRes.Deliveries) == 0 {
+		t.Fatalf("expected at least 1 delivery created")
+	}
+	deliveryID := evtRes.Deliveries[0].ID
+
+	// 3. Mark delivery as dead
+	_, err := queries.MarkDeliveryDead(ctx, deliveryID)
+	if err != nil {
+		t.Fatalf("failed to mark delivery dead: %v", err)
+	}
+
+	// 4. Request Replay POST /deliveries/:id/replay
+	wReplay := performRequest(server.Router(), "POST", fmt.Sprintf("/deliveries/%d/replay", deliveryID), nil)
+	if wReplay.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for replay, got %d: %s", wReplay.Code, wReplay.Body.String())
+	}
+
+	var replayRes api.DeliveryResponse
+	if err := json.Unmarshal(wReplay.Body.Bytes(), &replayRes); err != nil {
+		t.Fatalf("failed to parse replay response: %v", err)
+	}
+
+	if replayRes.Status != string(store.DeliveryStatusPending) {
+		t.Errorf("expected status pending after replay, got %s", replayRes.Status)
+	}
+	if replayRes.Attempts != 0 {
+		t.Errorf("expected attempts reset to 0 after replay, got %d", replayRes.Attempts)
+	}
+
+	// 5. Verify non-existent delivery returns 404
+	wNotFound := performRequest(server.Router(), "POST", "/deliveries/999999999/replay", nil)
+	if wNotFound.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for non-existent delivery replay, got %d", wNotFound.Code)
+	}
+}

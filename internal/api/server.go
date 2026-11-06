@@ -68,5 +68,6 @@ func (s *Server) registerRoutes() {
 	deliveriesGroup := s.router.Group("/deliveries")
 	{
 		deliveriesGroup.GET("/:id", s.GetDeliveryByIDHandler)
+		deliveriesGroup.POST("/:id/replay", s.ReplayDeliveryHandler)
 	}
 }

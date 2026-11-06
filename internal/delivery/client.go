@@ -3,9 +3,10 @@ package delivery
 import (
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"time"
+
+	"github.com/fenet-as/hookrelay/internal/netguard"
 )
 
 // ClientConfig holds network and connection pool configuration for outbound webhook requests.
@@ -18,6 +19,7 @@ type ClientConfig struct {
 	MaxIdleConnsPerHost   int
 	IdleConnTimeout       time.Duration
 	MaxResponseBodyBytes  int64
+	AllowLocal            bool // When false, netguard blocks SSRF attempts against loopback/private IPs
 }
 
 // DefaultClientConfig returns production defaults for delivering webhooks to untrusted external systems.
@@ -31,23 +33,26 @@ func DefaultClientConfig() ClientConfig {
 		MaxIdleConnsPerHost:   10,
 		IdleConnTimeout:       90 * time.Second,
 		MaxResponseBodyBytes:  1024, // 1 KB max response body stored
+		AllowLocal:            true, // Default true for local dev/testing; set false in prod
 	}
 }
 
-// Client wraps an *http.Client configured with strict timeouts, connection reuse, and no redirect following.
+// Client wraps an *http.Client configured with strict timeouts, connection reuse, SSRF protection, and no redirect following.
 type Client struct {
 	httpClient           *http.Client
 	maxResponseBodyBytes int64
 }
 
-// NewClient constructs an outbound HTTP Client with tuned transport settings.
+// NewClient constructs an outbound HTTP Client with tuned transport settings and SSRF netguard.
 func NewClient(cfg ClientConfig) *Client {
+	dialer := netguard.NewDialer(netguard.Config{
+		AllowLocal:  cfg.AllowLocal,
+		DialTimeout: cfg.DialTimeout,
+	})
+
 	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   cfg.DialTimeout,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialer.DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          cfg.MaxIdleConns,
 		MaxIdleConnsPerHost:   cfg.MaxIdleConnsPerHost,

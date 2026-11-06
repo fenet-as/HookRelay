@@ -13,21 +13,23 @@ import (
 
 // PoolConfig holds worker pool concurrency and polling parameters.
 type PoolConfig struct {
-	Workers            int
-	PollInterval       time.Duration
-	BatchSize          int32
-	LockStaleThreshold time.Duration
-	RetryPolicy        RetryPolicy
+	Workers                     int
+	PollInterval                time.Duration
+	BatchSize                   int32
+	LockStaleThreshold          time.Duration
+	RetryPolicy                 RetryPolicy
+	ConsecutiveFailureThreshold int32
 }
 
 // DefaultPoolConfig returns standard production defaults for background delivery workers.
 func DefaultPoolConfig() PoolConfig {
 	return PoolConfig{
-		Workers:            5,
-		PollInterval:       500 * time.Millisecond,
-		BatchSize:          20,
-		LockStaleThreshold: 5 * time.Minute,
-		RetryPolicy:        DefaultRetryPolicy(),
+		Workers:                     5,
+		PollInterval:                500 * time.Millisecond,
+		BatchSize:                   20,
+		LockStaleThreshold:          5 * time.Minute,
+		RetryPolicy:                 DefaultRetryPolicy(),
+		ConsecutiveFailureThreshold: 20,
 	}
 }
 
@@ -221,6 +223,48 @@ func (p *Pool) processDelivery(ctx context.Context, item store.GetDeliveryWithDe
 		)
 		if _, err := p.queries.MarkDeliveryDead(ctx, item.DeliveryID); err != nil {
 			p.logger.Error("failed to mark delivery dead", "delivery_id", item.DeliveryID, "error", err)
+		}
+	}
+
+	// 3. Track consecutive failures and auto-disable if threshold exceeded
+	p.checkEndpointFailureThreshold(ctx, item.EndpointID)
+}
+
+func (p *Pool) checkEndpointFailureThreshold(ctx context.Context, endpointID int64) {
+	if p.config.ConsecutiveFailureThreshold <= 0 {
+		return
+	}
+
+	threshold := p.config.ConsecutiveFailureThreshold
+	attempts, err := p.queries.GetRecentAttemptsForEndpoint(ctx, store.GetRecentAttemptsForEndpointParams{
+		EndpointID: endpointID,
+		Limit:      threshold,
+	})
+	if err != nil {
+		p.logger.Error("failed to check recent attempts for endpoint", "endpoint_id", endpointID, "error", err)
+		return
+	}
+
+	if int32(len(attempts)) < threshold {
+		return
+	}
+
+	// Check if every attempt failed (status code < 200 or >= 300 or error is set)
+	allFailed := true
+	for _, a := range attempts {
+		if a.StatusCode.Valid && a.StatusCode.Int32 >= 200 && a.StatusCode.Int32 < 300 {
+			allFailed = false
+			break
+		}
+	}
+
+	if allFailed {
+		p.logger.Warn("endpoint exceeded consecutive failure threshold, auto-disabling",
+			slog.Int64("endpoint_id", endpointID),
+			slog.Int("threshold", int(threshold)),
+		)
+		if err := p.queries.DeactivateEndpoint(ctx, endpointID); err != nil {
+			p.logger.Error("failed to auto-disable endpoint", "endpoint_id", endpointID, "error", err)
 		}
 	}
 }
