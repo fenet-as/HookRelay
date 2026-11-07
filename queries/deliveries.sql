@@ -92,3 +92,14 @@ SET
     locked_at = NULL
 WHERE id = $1
 RETURNING *;
+
+-- name: CountPendingDeliveries :one
+SELECT COUNT(*) FROM deliveries
+WHERE status = 'pending';
+
+-- name: CountDueDeliveries :one
+SELECT COUNT(*) FROM deliveries
+WHERE status = 'pending'
+  AND next_run_at <= now()
+  AND locked_at IS NULL;
+

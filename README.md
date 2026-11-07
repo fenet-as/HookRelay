@@ -402,17 +402,46 @@ Permanent client rejections (HTTP `400`, `401`, `403`, `404`, `410`, `422`) tran
 | `DATABASE_URL` | `postgres://postgres@localhost:5432/hookrelay?sslmode=disable` | PostgreSQL connection string. |
 | `HOOKRELAY_ALLOW_LOCAL` | `true` | When `false`, NetGuard blocks loopback and private IPs (set to `false` in production). |
 
-### Running with Docker Compose
+### Running with Docker Compose (PostgreSQL, Prometheus & Grafana)
 
-Start the PostgreSQL database:
+Start the full infrastructure stack:
 ```bash
 docker compose up -d
 ```
+This boots up:
+- **PostgreSQL** on `localhost:5432`
+- **Prometheus** on `localhost:9090` (configured to scrape HookRelay metrics)
+- **Grafana** on `localhost:3000` (pre-provisioned with the HookRelay Overview Dashboard)
 
 Run HookRelay:
 ```bash
 go run ./cmd/hookrelay
 ```
+
+Access the dashboards:
+- **HookRelay API & Metrics:** `http://localhost:8080/metrics`
+- **Prometheus Scraper UI:** `http://localhost:9090`
+- **Grafana Live Dashboard:** `http://localhost:3000` *(Login: `admin` / `admin`)*
+
+---
+
+## Telemetry & Observability (Prometheus & Grafana)
+
+HookRelay natively exposes real-time Prometheus metrics at `GET /metrics` for deep operational visibility:
+
+| Metric Name | Type | Description |
+|---|---|---|
+| `hookrelay_events_ingested_total` | Counter | Total events received via `POST /events` (labeled by `type`, `duplicate`). |
+| `hookrelay_deliveries_created_total` | Counter | Total deliveries fanned out across subscriber endpoints (labeled by `event_type`). |
+| `hookrelay_deliveries_attempts_total` | Counter | Outbound attempts labeled by `status` (`success`, `retry`, `dead`) and `status_code`. |
+| `hookrelay_deliveries_duration_seconds` | Histogram | Latency distribution of outbound HTTP requests (p50, p90, p99). |
+| `hookrelay_reaper_recovered_deliveries_total` | Counter | Stuck deliveries reclaimed by the crash recovery reaper. |
+| `hookrelay_endpoints_deactivated_total` | Counter | Endpoints auto-disabled by consecutive failure circuit breakers. |
+| `hookrelay_queue_pending_deliveries` | Gauge | Current count of pending deliveries in PostgreSQL. |
+| `hookrelay_queue_due_deliveries` | Gauge | Deliveries due for execution right now (`next_run_at <= now`). |
+| `hookrelay_endpoints_active_count` | Gauge | Count of active endpoints currently accepting deliveries. |
+
+The included Grafana dashboard (`deploy/grafana/dashboards/hookrelay.json`) visualizes queue backlog depth, worker throughput, latency percentiles, error rates, and endpoint circuit breaker events out of the box.
 
 ### Running the Built-in Test Receiver
 

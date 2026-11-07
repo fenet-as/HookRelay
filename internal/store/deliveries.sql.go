@@ -61,6 +61,32 @@ func (q *Queries) ClaimDueDeliveries(ctx context.Context, arg ClaimDueDeliveries
 	return items, nil
 }
 
+const countDueDeliveries = `-- name: CountDueDeliveries :one
+SELECT COUNT(*) FROM deliveries
+WHERE status = 'pending'
+  AND next_run_at <= now()
+  AND locked_at IS NULL
+`
+
+func (q *Queries) CountDueDeliveries(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countDueDeliveries)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countPendingDeliveries = `-- name: CountPendingDeliveries :one
+SELECT COUNT(*) FROM deliveries
+WHERE status = 'pending'
+`
+
+func (q *Queries) CountPendingDeliveries(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countPendingDeliveries)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createDelivery = `-- name: CreateDelivery :one
 INSERT INTO deliveries (event_id, endpoint_id, status, next_run_at)
 VALUES ($1, $2, 'pending', now())

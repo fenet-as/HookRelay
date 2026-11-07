@@ -18,6 +18,7 @@ import (
 	"github.com/fenet-as/hookrelay/internal/crypto"
 	"github.com/fenet-as/hookrelay/internal/id"
 	"github.com/fenet-as/hookrelay/internal/store"
+	"github.com/fenet-as/hookrelay/internal/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -42,7 +43,7 @@ func setupTestServer(t *testing.T) (*api.Server, *pgxpool.Pool, func()) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := api.NewServer(pool, logger)
+	server := api.NewServer(pool, logger, telemetry.NewMetrics())
 
 	cleanup := func() {
 		pool.Close()
@@ -423,5 +424,30 @@ func TestReplayDelivery(t *testing.T) {
 	wNotFound := performRequest(server.Router(), "POST", "/deliveries/999999999/replay", nil)
 	if wNotFound.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for non-existent delivery replay, got %d", wNotFound.Code)
+	}
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	server, _, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// 1. Publish an event to trigger metric increments
+	eventPayload := []byte(`{"type": "telemetry.test", "data": {"key": "val"}}`)
+	wPub := performRequest(server.Router(), "POST", "/events", eventPayload)
+	if wPub.Code != http.StatusAccepted {
+		t.Fatalf("failed to publish event: %d", wPub.Code)
+	}
+
+	w := performRequest(server.Router(), "GET", "/metrics", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for /metrics, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "hookrelay_events_ingested_total") {
+		t.Errorf("expected /metrics to expose hookrelay_events_ingested_total, got:\n%s", body)
+	}
+	if !strings.Contains(body, "hookrelay_queue_pending_deliveries") {
+		t.Errorf("expected /metrics to expose hookrelay_queue_pending_deliveries")
 	}
 }

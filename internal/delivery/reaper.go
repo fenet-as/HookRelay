@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/fenet-as/hookrelay/internal/store"
+	"github.com/fenet-as/hookrelay/internal/telemetry"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -29,20 +30,28 @@ type Reaper struct {
 	config  ReaperConfig
 	queries *store.Queries
 	logger  *slog.Logger
+	metrics *telemetry.Metrics
 }
 
 // NewReaper constructs a new crash recovery Reaper.
-func NewReaper(cfg ReaperConfig, queries *store.Queries, logger *slog.Logger) *Reaper {
+func NewReaper(cfg ReaperConfig, queries *store.Queries, logger *slog.Logger, metrics ...*telemetry.Metrics) *Reaper {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 30 * time.Second
 	}
 	if cfg.StaleThreshold <= 0 {
 		cfg.StaleThreshold = 5 * time.Minute
 	}
+
+	var m *telemetry.Metrics
+	if len(metrics) > 0 {
+		m = metrics[0]
+	}
+
 	return &Reaper{
 		config:  cfg,
 		queries: queries,
 		logger:  logger,
+		metrics: m,
 	}
 }
 
@@ -77,6 +86,9 @@ func (r *Reaper) Reap(ctx context.Context) int {
 
 	count := len(unlocked)
 	if count > 0 {
+		if r.metrics != nil {
+			r.metrics.ReaperRecovered.Add(float64(count))
+		}
 		r.logger.Warn("reaper recovered stuck deliveries from crashed workers",
 			slog.Int("count", count),
 			slog.Duration("stale_threshold", r.config.StaleThreshold),

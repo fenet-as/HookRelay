@@ -5,6 +5,7 @@ import (
 
 	"github.com/fenet-as/hookrelay/internal/fanout"
 	"github.com/fenet-as/hookrelay/internal/store"
+	"github.com/fenet-as/hookrelay/internal/telemetry"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -16,12 +17,18 @@ type Server struct {
 	pool    *pgxpool.Pool
 	logger  *slog.Logger
 	fanout  *fanout.Engine
+	metrics *telemetry.Metrics
 }
 
 // NewServer builds and configures a new HTTP Server instance.
-func NewServer(pool *pgxpool.Pool, logger *slog.Logger) *Server {
+func NewServer(pool *pgxpool.Pool, logger *slog.Logger, metrics ...*telemetry.Metrics) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
+
+	var m *telemetry.Metrics
+	if len(metrics) > 0 {
+		m = metrics[0]
+	}
 
 	s := &Server{
 		router:  router,
@@ -29,6 +36,7 @@ func NewServer(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 		pool:    pool,
 		logger:  logger,
 		fanout:  fanout.NewEngine(pool),
+		metrics: m,
 	}
 
 	// Attach custom slog logging and panic recovery
@@ -48,6 +56,10 @@ func (s *Server) Router() *gin.Engine {
 
 func (s *Server) registerRoutes() {
 	s.router.GET("/healthz", s.HealthzHandler)
+
+	if s.metrics != nil {
+		s.router.GET("/metrics", gin.WrapH(s.metrics.HTTPHandler()))
+	}
 
 	endpointsGroup := s.router.Group("/endpoints")
 	{
