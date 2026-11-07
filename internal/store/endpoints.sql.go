@@ -11,6 +11,18 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countActiveEndpoints = `-- name: CountActiveEndpoints :one
+SELECT COUNT(*) FROM endpoints
+WHERE active = true
+`
+
+func (q *Queries) CountActiveEndpoints(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveEndpoints)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createEndpoint = `-- name: CreateEndpoint :one
 INSERT INTO endpoints (url, secret, event_types, active)
 VALUES ($1, $2, $3, $4)

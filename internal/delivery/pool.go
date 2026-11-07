@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/fenet-as/hookrelay/internal/store"
+	"github.com/fenet-as/hookrelay/internal/telemetry"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -39,13 +41,14 @@ type Pool struct {
 	dispatcher *Dispatcher
 	queries    *store.Queries
 	logger     *slog.Logger
+	metrics    *telemetry.Metrics
 	workChan   chan store.GetDeliveryWithDetailsRow
 	wg         sync.WaitGroup
 	cancel     context.CancelFunc
 }
 
 // NewPool creates a new worker Pool instance.
-func NewPool(cfg PoolConfig, dispatcher *Dispatcher, queries *store.Queries, logger *slog.Logger) *Pool {
+func NewPool(cfg PoolConfig, dispatcher *Dispatcher, queries *store.Queries, logger *slog.Logger, metrics ...*telemetry.Metrics) *Pool {
 	if cfg.Workers <= 0 {
 		cfg.Workers = 1
 	}
@@ -59,11 +62,17 @@ func NewPool(cfg PoolConfig, dispatcher *Dispatcher, queries *store.Queries, log
 		cfg.LockStaleThreshold = 5 * time.Minute
 	}
 
+	var m *telemetry.Metrics
+	if len(metrics) > 0 {
+		m = metrics[0]
+	}
+
 	return &Pool{
 		config:     cfg,
 		dispatcher: dispatcher,
 		queries:    queries,
 		logger:     logger,
+		metrics:    m,
 		workChan:   make(chan store.GetDeliveryWithDetailsRow, cfg.Workers*2),
 	}
 }
@@ -176,8 +185,18 @@ func (p *Pool) processDelivery(ctx context.Context, item store.GetDeliveryWithDe
 		return
 	}
 
+	durationSec := result.Duration.Seconds()
+	statusStr := strconv.Itoa(result.StatusCode)
+	if result.StatusCode == 0 {
+		statusStr = "0"
+	}
+
 	// 1. Success (2xx)
 	if result.Success {
+		if p.metrics != nil {
+			p.metrics.DeliveryAttempts.WithLabelValues("success", statusStr).Inc()
+			p.metrics.DeliveryDuration.WithLabelValues("success").Observe(durationSec)
+		}
 		if _, err := p.queries.MarkDeliverySucceeded(ctx, item.DeliveryID); err != nil {
 			p.logger.Error("failed to mark delivery succeeded", "delivery_id", item.DeliveryID, "error", err)
 		}
@@ -196,6 +215,10 @@ func (p *Pool) processDelivery(ctx context.Context, item store.GetDeliveryWithDe
 				slog.Int64("delivery_id", item.DeliveryID),
 				slog.Int("attempts", int(nextAttempt)),
 			)
+			if p.metrics != nil {
+				p.metrics.DeliveryAttempts.WithLabelValues("dead", statusStr).Inc()
+				p.metrics.DeliveryDuration.WithLabelValues("dead").Observe(durationSec)
+			}
 			if _, err := p.queries.MarkDeliveryDead(ctx, item.DeliveryID); err != nil {
 				p.logger.Error("failed to mark delivery dead", "delivery_id", item.DeliveryID, "error", err)
 			}
@@ -207,6 +230,10 @@ func (p *Pool) processDelivery(ctx context.Context, item store.GetDeliveryWithDe
 				slog.Int("attempt", int(nextAttempt)),
 				slog.Duration("backoff", backoff),
 			)
+			if p.metrics != nil {
+				p.metrics.DeliveryAttempts.WithLabelValues("retry", statusStr).Inc()
+				p.metrics.DeliveryDuration.WithLabelValues("retry").Observe(durationSec)
+			}
 			_, err := p.queries.ScheduleDeliveryRetry(ctx, store.ScheduleDeliveryRetryParams{
 				ID:        item.DeliveryID,
 				NextRunAt: pgtype.Timestamptz{Time: nextRunAt, Valid: true},
@@ -221,6 +248,10 @@ func (p *Pool) processDelivery(ctx context.Context, item store.GetDeliveryWithDe
 			slog.Int64("delivery_id", item.DeliveryID),
 			slog.Int("status_code", result.StatusCode),
 		)
+		if p.metrics != nil {
+			p.metrics.DeliveryAttempts.WithLabelValues("dead", statusStr).Inc()
+			p.metrics.DeliveryDuration.WithLabelValues("dead").Observe(durationSec)
+		}
 		if _, err := p.queries.MarkDeliveryDead(ctx, item.DeliveryID); err != nil {
 			p.logger.Error("failed to mark delivery dead", "delivery_id", item.DeliveryID, "error", err)
 		}
@@ -263,6 +294,9 @@ func (p *Pool) checkEndpointFailureThreshold(ctx context.Context, endpointID int
 			slog.Int64("endpoint_id", endpointID),
 			slog.Int("threshold", int(threshold)),
 		)
+		if p.metrics != nil {
+			p.metrics.EndpointsDeactivated.Inc()
+		}
 		if err := p.queries.DeactivateEndpoint(ctx, endpointID); err != nil {
 			p.logger.Error("failed to auto-disable endpoint", "endpoint_id", endpointID, "error", err)
 		}

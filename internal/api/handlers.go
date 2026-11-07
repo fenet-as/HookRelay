@@ -298,6 +298,13 @@ func (s *Server) PublishEventHandler(c *gin.Context) {
 		return
 	}
 
+	if s.metrics != nil {
+		s.metrics.EventsIngested.WithLabelValues(result.Event.Type, strconv.FormatBool(result.IsDuplicate)).Inc()
+		if len(result.Deliveries) > 0 {
+			s.metrics.DeliveriesCreated.WithLabelValues(result.Event.Type).Add(float64(len(result.Deliveries)))
+		}
+	}
+
 	c.JSON(http.StatusAccepted, PublishEventResponse{
 		ID:              result.Event.ID,
 		Type:            result.Event.Type,

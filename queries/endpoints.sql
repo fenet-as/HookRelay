@@ -49,3 +49,8 @@ UPDATE endpoints
 SET active = false
 WHERE id = $1;
 
+-- name: CountActiveEndpoints :one
+SELECT COUNT(*) FROM endpoints
+WHERE active = true;
+
+

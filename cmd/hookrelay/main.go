@@ -14,6 +14,7 @@ import (
 	"github.com/fenet-as/hookrelay/internal/config"
 	"github.com/fenet-as/hookrelay/internal/delivery"
 	"github.com/fenet-as/hookrelay/internal/store"
+	"github.com/fenet-as/hookrelay/internal/telemetry"
 )
 
 func main() {
@@ -61,22 +62,27 @@ func main() {
 
 	queries := store.New(dbPool)
 
-	// 3. Initialize Outbound Delivery Client, Dispatcher, Worker Pool, and Crash Recovery Reaper
+	// 3. Initialize Telemetry and Periodic Queue Gauges Collector
+	metrics := telemetry.NewMetrics()
+	collector := telemetry.NewCollector(queries, metrics, logger)
+	go collector.Start(ctx, 5*time.Second)
+
+	// 4. Initialize Outbound Delivery Client, Dispatcher, Worker Pool, and Crash Recovery Reaper
 	clientCfg := delivery.DefaultClientConfig()
 	clientCfg.AllowLocal = cfg.AllowLocal
 	client := delivery.NewClient(clientCfg)
 	dispatcher := delivery.NewDispatcher(client, queries, logger)
 
 	workerPoolCfg := delivery.DefaultPoolConfig()
-	deliveryPool := delivery.NewPool(workerPoolCfg, dispatcher, queries, logger)
+	deliveryPool := delivery.NewPool(workerPoolCfg, dispatcher, queries, logger, metrics)
 	deliveryPool.Start(ctx)
 
 	reaperCfg := delivery.DefaultReaperConfig()
-	reaper := delivery.NewReaper(reaperCfg, queries, logger)
+	reaper := delivery.NewReaper(reaperCfg, queries, logger, metrics)
 	go reaper.Start(ctx)
 
-	// 4. Initialize API server
-	server := api.NewServer(dbPool, logger)
+	// 5. Initialize API server (including /metrics scrape endpoint)
+	server := api.NewServer(dbPool, logger, metrics)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	httpServer := &http.Server{
